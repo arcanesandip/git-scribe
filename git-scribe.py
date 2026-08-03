@@ -1,40 +1,48 @@
 #!/usr/bin/env python3
-"""git-scribe (gcap): auto-stage, auto-message, commit, and push."""
+"""git-scribe (gcap): heuristic pre-analysis + AI verification.
+
+Also handles description generation and sync (commit + push).
+"""
+import json
+import os
 import re
 import subprocess
 import sys
+import urllib.request
 
-# Diff header/hunk lines to exclude when scanning for intent keywords, so
-# we only look at actual added/removed content, not metadata like
-# "+++ b/file.py" or "@@ -1,4 +1,6 @@".
 _DIFF_HEADER_PREFIXES = ("diff --git", "index ", "+++", "---", "@@")
-
 _FIX_PATTERN = re.compile(r"\b(fix|bug|hotfix|patch)\b", re.IGNORECASE)
 _FEAT_PATTERN = re.compile(r"\b(def|class|function)\b")
+
+ALLOWED_TYPES = [
+    "feat", "fix", "refactor", "docs", "chore", "style",
+    "test", "perf", "build", "ci", "revert", "config",
+]
+
+# Model is configurable via GCAP_MODEL so people with more headroom can
+# use a bigger, more accurate Qwen2.5-Coder variant. Default is 1.5b —
+# picked deliberately, not as a ceiling: gcap runs on every commit, so
+# it should stay light and not compete with the GPU for VRAM. See the
+# README's "Choosing a model" section for a size/hardware guide.
+MODEL = os.environ.get("GCAP_MODEL", "qwen2.5-coder:1.5b")
+OLLAMA_URL = os.environ.get(
+    "GCAP_OLLAMA_URL", "http://localhost:11434/api/chat"
+)
 
 
 def run(cmd):
     """Run a shell command (read-only git queries) and return stdout."""
     result = subprocess.run(
-        cmd,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        shell=True,
+        cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        text=True, shell=True,
     )
     return result.stdout.strip()
 
 
 def run_argv(cmd_list):
-    """Run a command as an argv list (no shell) for mutating git calls.
-
-    Returns (returncode, stdout, stderr).
-    """
+    """Run a command as an argv list (no shell) for mutating git calls."""
     result = subprocess.run(
-        cmd_list,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
+        cmd_list, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
     )
     return result.returncode, result.stdout.strip(), result.stderr.strip()
 
@@ -59,13 +67,7 @@ def classify_files(status_output):
 
 
 def diff_content_lines(diff_data):
-    """Extract only real added/removed content lines from a unified diff.
-
-    Strips out diff headers and hunk markers (e.g. "diff --git",
-    "index ...", "+++", "---", "@@ ... @@") so keyword matching only
-    ever looks at lines someone actually wrote or removed, not diff
-    metadata or file paths.
-    """
+    """Extract only real added/removed content lines from a unified diff."""
     content = []
     for line in diff_data.splitlines():
         if line.startswith(_DIFF_HEADER_PREFIXES):
@@ -75,17 +77,12 @@ def diff_content_lines(diff_data):
     return content
 
 
-def detect_intent(diff_data, top_file, ext, is_deletion):
-    """Heuristic conventional-commit type from diff content and filename.
-
-    Keyword checks use word-boundary regex against actual diff content
-    lines only (not headers/hunk markers), so "prefix" won't match
-    "fix" and a filename mention won't leak into the diff scan. It's
-    still a heuristic over text, not a semantic understanding of the
-    change, so treat the result as a helpful default, not ground truth.
-    """
+def heuristic_detect_intent(diff_data, top_file, ext, is_deletion):
+    """Python's first-pass heuristic intent detection."""
     if is_deletion:
         return "refactor"
+    if ".github/workflows" in top_file:
+        return "ci"
 
     content_text = "\n".join(diff_content_lines(diff_data))
 
@@ -101,12 +98,82 @@ def detect_intent(diff_data, top_file, ext, is_deletion):
     return "chore"
 
 
-def extract_scope(top_file, ext):
-    """Derive a conventional-commit scope from the changed file's path."""
+def heuristic_extract_scope(top_file, ext):
+    """Python's first-pass scope extraction from file paths."""
     if "/" in top_file:
         parts = top_file.split("/")
+        meaningful_parts = [p for p in parts if not p.startswith(".")]
+        if meaningful_parts:
+            return (meaningful_parts[-2] if len(meaningful_parts) > 1
+                    else meaningful_parts[0])
         return parts[-2] if len(parts) > 1 else parts[0]
     return ext if ext else "misc"
+
+
+def ai_verify_and_describe(diff_data, initial_type, initial_scope):
+    """AI review loop: verify heuristic type/scope, write description."""
+    prompt = f"""You are a Git commit validation engine.
+Review the proposed heuristic type and scope against the git diff,
+adjust them if necessary, and write a short imperative description.
+
+Heuristic Proposed Type: {initial_type}
+Heuristic Proposed Scope: {initial_scope}
+Allowed Types: {", ".join(ALLOWED_TYPES)}
+
+INSTRUCTIONS:
+1. Confirm or correct the type/scope based on the diff.
+2. Write a concise, imperative-tense short description (max 6-8
+   words, no punctuation at the end) that summarizes ALL changed
+   files in the diff, not just the first one.
+3. Do not quote or repeat text found inside the diff (e.g.
+   docstrings, comments) as the description — describe the change
+   itself in your own words.
+4. Output strictly in JSON with keys: "type", "scope", "description".
+
+DIFF:
+{diff_data}"""
+
+    payload = {
+        "model": MODEL,
+        "messages": [{"role": "user", "content": prompt}],
+        "stream": False,
+        "options": {"temperature": 0.1},
+    }
+
+    req = urllib.request.Request(
+        OLLAMA_URL,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+    )
+
+    try:
+        with urllib.request.urlopen(req, timeout=15) as response:
+            res_data = json.loads(response.read().decode("utf-8"))
+            content = res_data.get("message", {}).get("content", "").strip()
+
+            if content.startswith("```"):
+                content = content.split("```")[1]
+                if content.startswith("json"):
+                    content = content[4:]
+                content = content.strip("`").strip()
+
+            parsed = json.loads(content)
+
+            final_type = parsed.get("type", initial_type)
+            if final_type not in ALLOWED_TYPES:
+                final_type = initial_type
+
+            final_scope = parsed.get("scope", initial_scope).strip("/")
+            description = parsed.get(
+                "description", "update repository files"
+            ).strip().strip('"').strip("'").strip().rstrip(".")
+
+            return final_type, final_scope, description, None
+
+    except Exception as exc:
+        # Fall back gracefully to heuristics, but say why — a silent
+        # fallback means you'd never know the AI step isn't working.
+        return initial_type, initial_scope, "update repository files", exc
 
 
 def build_body(added, modified, deleted):
@@ -125,22 +192,18 @@ def build_body(added, modified, deleted):
 
 
 def main():
-    # 1. Ensure we are inside a git repository
     if run("git rev-parse --is-inside-work-tree") != "true":
         print("Error: Not a git repository.")
         sys.exit(1)
 
-    # 2. Check for changes
     if not run("git status --porcelain"):
         print("No changes to commit.")
         sys.exit(0)
 
-    # Stage everything automatically
     run("git add -A")
     diff_data = run("git diff --cached")
     status_output = run("git diff --cached --name-status")
     changed_files = run("git diff --cached --name-only").splitlines()
-    file_count = len(changed_files)
 
     if not changed_files:
         print("Nothing staged.")
@@ -152,18 +215,27 @@ def main():
     added_files, modified_files, deleted_files = classify_files(
         status_output
     )
-    is_deletion = (
-        deleted_files and not added_files and not modified_files
+    is_deletion = deleted_files and not added_files and not modified_files
+
+    initial_type = heuristic_detect_intent(
+        diff_data, top_file, ext, is_deletion
     )
+    initial_scope = heuristic_extract_scope(top_file, ext)
 
-    intent = detect_intent(diff_data, top_file, ext, is_deletion)
-    scope = extract_scope(top_file, ext)
+    print(f"Heuristics guessed -> Type: {initial_type} | "
+          f"Scope: {initial_scope}")
+    print(f"Running AI verification ({MODEL})...")
 
-    msg = f"{intent}({scope}): auto-update {file_count} file(s) [via gcap]"
+    final_type, final_scope, description, ai_error = ai_verify_and_describe(
+        diff_data, initial_type, initial_scope
+    )
+    if ai_error is not None:
+        print(f"AI verification unavailable ({ai_error}); "
+              f"using heuristic result instead.")
+
+    msg = f"{final_type}({final_scope}): {description}"
     body = build_body(added_files, modified_files, deleted_files)
 
-    # Commit as an argv list (no shell) so quotes/backticks/$ in file
-    # paths or diff content can't break out of the command string.
     commit_code, commit_out, commit_err = run_argv(
         ["git", "commit", "-m", msg, "-m", body]
     )
@@ -171,7 +243,6 @@ def main():
         print(f"Commit failed:\n{commit_err or commit_out}")
         sys.exit(1)
 
-    # Check the real exit code / stderr, not a stdout substring guess.
     push_code, push_out, push_err = run_argv(["git", "push"])
     if push_code != 0:
         print(f"Scribed locally, but push failed:\n{push_err or push_out}")
