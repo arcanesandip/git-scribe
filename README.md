@@ -2,21 +2,19 @@
 
 [![CI](https://github.com/arcanesandip/git-scribe/actions/workflows/ci.yml/badge.svg)](https://github.com/arcanesandip/git-scribe/actions/workflows/ci.yml)
 
-A zero-dependency, heuristic-driven CLI utility that auto-stages, auto-messages, commits, and pushes — for solo, private repos where you don't want to think about commit hygiene mid-flow.
+Auto-stages, writes, commits, and pushes your git changes. Free, local, no accounts, no cloud API — including the optional AI step.
 
-Run `gcap`. It stages everything, figures out a reasonable conventional-commit type and scope from what changed, writes a categorized commit body, commits, and pushes. No prompts, no API keys, no network calls beyond git itself.
+Run `gcap`. No prompts, no interruptions.
 
 ---
 
 ## Why
 
-On solo projects and dotfiles, stopping to write a commit message is pure friction — and skipping it leads to a history full of `update`, `wip`, `asdf`. `git-scribe` removes the decision entirely:
+Stopping to write a commit message breaks flow, and skipping it leaves a history full of `update`, `wip`, `asdf`. `git-scribe` removes the decision:
 
-- **Local only.** Standard library + git. No API keys, no telemetry, works offline.
-- **Deterministic.** No LLM calls, no network latency, no surprises.
-- **Built for one person.** No review gate, no team conventions to satisfy — just a clean, searchable ledger of your own history.
-
-This is explicitly *not* built for shared or team repos — see [Scope & limitations](#scope--limitations).
+- A word-boundary heuristic picks a type/scope. An optional local LLM can review and refine it.
+- If the AI step isn't available, you still get a correct commit — never a blocked one.
+- Built for solo use — no review gate, no team conventions. Not intended for shared repos; see [Scope & limitations](#scope--limitations).
 
 ---
 
@@ -26,60 +24,88 @@ This is explicitly *not* built for shared or team repos — see [Scope & limitat
 [Working tree]
      │
      ▼  git add -A
-[State capture]      → git status / diff --cached / --name-status
+[State capture]        → git status / diff --cached / --name-status
      │
      ▼
-[File classifier]    → splits changes into Added (+) / Modified (~) / Deleted (-)
+[File classifier]      → Added (+) / Modified (~) / Deleted (-)
      │
      ▼
-[Intent heuristic]   → picks a conventional-commit type from diff + filename
+[Heuristic pre-pass]   → word-boundary rules → first-guess type + scope
      │
      ▼
-[Scope extraction]   → derives scope from the changed file's parent directory
-     │
+[AI verification]      → optional, local — reviews/corrects the guess, writes a description
+     │                     falls back to the heuristic result if unavailable
      ▼
-[Commit + push]      → git commit -m "<type>(<scope>): ..." && git push
+[Commit + push]        → git commit -m "<type>(<scope>): <description>" && git push
 ```
 
-**Intent rules** (first match wins):
+### Heuristic rules (first match wins)
 
 | Condition | Type |
 |---|---|
 | Commit is deletions only | `refactor` |
-| Diff content contains the word `fix`, `bug`, `hotfix`, or `patch` | `fix` |
+| Top file is under `.github/workflows/` | `ci` |
+| Diff content contains `fix`, `bug`, `hotfix`, or `patch` | `fix` |
 | Top file is `.md` / `.txt` / `.rst` | `docs` |
 | Top file is a config/dotfile (`.config`, `.zsh`, `.json`, `.yaml`, `.yml`, `.toml`) | `config` |
-| Diff content contains the word `def`, `class`, or `function` | `feat` |
+| Diff content contains `def`, `class`, or `function` | `feat` |
 | None of the above | `chore` |
 
-Keyword matching uses **word-boundary regex over actual added/removed diff lines only** — diff headers, hunk markers (`@@ ... @@`), and file-path metadata are excluded first, so a file literally named `bugfix_notes.py` or a word like "prefix"/"definitely" won't false-positive on `fix`/`def`.
+Matching uses word-boundary regex over actual added/removed diff lines only — headers, hunk markers, and file paths are excluded, so `bugfix_notes.py` or "prefix" won't false-positive on `fix`/`def`. Still pattern-matching, not code understanding — treat the result as a good default you can amend.
 
-> **Heuristic, not ground truth.** It's still text pattern-matching, not code understanding — a comment that genuinely contains the standalone word "fix" will still match. For a private ledger that's a cosmetic issue, not a correctness one. Treat the generated type as a good default you can always amend.
+### AI-assisted verification (optional)
+
+Runs a second pass through a local LLM via [Ollama](https://ollama.com). It reviews the heuristic's guess, can correct type/scope, and writes the description. If Ollama isn't running or the model isn't pulled, `gcap` prints why and falls back to the heuristic — no hang, no failure.
+
+**Default model: `qwen2.5-coder:1.5b`.** Deliberate, not a ceiling — `gcap` runs on every commit, so it stays light rather than competing with your GPU for VRAM.
+
+Override with an environment variable:
+
+```bash
+export GCAP_MODEL="qwen2.5-coder:3b"   # or 7b, 14b, 32b
+export GCAP_OLLAMA_URL="http://your-host:11434/api/chat"   # point at a different host
+```
+
+| Model | Approx. VRAM | Good fit if... |
+|---|---|---|
+| `1.5b` (default) | ~2 GB | Background use, integrated graphics, low VRAM |
+| `3b` | ~4 GB | Mid-range GPU, want noticeably better summaries |
+| `7b` | ~8 GB | Dedicated 8GB+ GPU, don't mind heavier use per commit |
+| `14b`+ | 16 GB+ | Workstation GPU, not a shared laptop |
+
+Bigger models summarize multi-file diffs more completely and are less prone to echoing unrelated text — a real capability gap tied to size, not the prompt.
 
 ---
 
 ## Install
 
-1. Save the script:
+### Option A: install script
 
-   ```bash
+```bash
+git clone https://github.com/arcanesandip/git-scribe.git
+cd git-scribe
+./install.sh
+```
+
+Checks for `python3`/`git`, lets you pick a model size if Ollama is installed (1.5b recommended, just press Enter), offers to pull it, installs the script to `~/scripts/git-scribe.py`, and adds `gcap`/`gcm` to your shell rc file idempotently.
+
+```bash
+source ~/.zshrc   # or ~/.bashrc
+```
+
+### Option B: manual
+
+1. ```bash
    mkdir -p ~/scripts
    # save git-scribe.py into ~/scripts/git-scribe.py
    chmod +x ~/scripts/git-scribe.py
    ```
 
-2. Add the shell function to `~/.zshrc` (or `~/.bashrc`):
-
+2. Add to `~/.zshrc` (or `~/.bashrc`):
    ```bash
-   # ==========================================
-   # GITHUB AUTOMATION SHORTCUTS
-   # ==========================================
-
    unalias gcap 2>/dev/null
 
    gcap() {
-       # Local project script takes priority, then a scripts/ folder,
-       # then your home scripts dir, then a plain fallback.
        if [[ -f "./git-scribe.py" ]]; then
            python3 ./git-scribe.py
        elif [[ -f "./scripts/git-scribe.py" ]]; then
@@ -100,13 +126,9 @@ Keyword matching uses **word-boundary regex over actual added/removed diff lines
    }
    ```
 
-3. Reload:
+3. `source ~/.zshrc`
 
-   ```bash
-   source ~/.zshrc
-   ```
-
-`gcap` checks, in order: a `git-scribe.py` in the current directory, then `./scripts/`, then `~/scripts/`, then falls back to a plain timestamped commit if the script isn't found anywhere. `gcm "message"` is the manual override for when you want to write your own message.
+`gcap` checks current dir → `./scripts/` → `~/scripts/` → falls back to a timestamped commit if the script isn't found. `gcm "message"` writes your own message manually.
 
 ---
 
@@ -119,48 +141,35 @@ gcap
 ```
 
 ```
+Heuristics guessed -> Type: feat | Scope: scripts
+Running AI verification (qwen2.5-coder:1.5b)...
+Scribed & pushed: feat(scripts): add retry logic to push step
+```
+
+If the AI step isn't available:
+
+```
+Running AI verification (qwen2.5-coder:1.5b)...
+AI verification unavailable ([Errno 111] Connection refused); using heuristic result instead.
 Scribed & pushed: feat(scripts): auto-update 3 file(s) [via gcap]
 ```
-
-Example resulting commit:
-
-```
-commit a8f2c91
-Author: you
-Date:   Mon Jul 27 2026
-
-    feat(scripts): auto-update 3 file(s) [via gcap]
-
-    Added files:
-    + scripts/new_module.py
-
-    Modified files:
-    ~ scripts/git-scribe.py
-
-    Deleted files:
-    - scripts/legacy_parser.py
-```
-
-Need a message you control instead? Use `gcm "your message here"`.
 
 ---
 
 ## Scope & limitations
 
-Built and tuned for **private, single-person use**. Specifically, it does *not*:
+Built for **private, single-person use**. It does *not*:
 
-- Show you a diff or ask for confirmation before committing — everything staged gets committed, every time.
-- Guarantee correct commit types/scopes — it's pattern matching on text, not code analysis.
-- Guard against secrets in the diff (`.env`, tokens, keys) — make sure your `.gitignore` covers anything sensitive before relying on `git add -A`.
-- Handle merge conflicts, rebases, or a rejected push (diverged remote) — those still need manual `git pull`/`git rebase`.
+- Show a diff or ask for confirmation — everything staged gets committed.
+- Guarantee correct types/scopes/descriptions — heuristics are pattern matching, and the AI step can occasionally misdescribe a change.
+- Guard against secrets in the diff — make sure `.gitignore` covers `.env`/tokens/keys before relying on `git add -A`.
+- Handle merge conflicts, rebases, or a rejected push — those need manual `git pull`/`git rebase`.
 
-None of that matters for a solo repo where you're the only reader of the history. If you ever point this at a shared/team repo, add a review step first.
+Fine for a solo repo where you're the only reader. Add a review step first if used on a shared repo.
 
 ---
 
 ## Testing
-
-The pure logic (file classification, intent detection, scope extraction, commit body formatting) is covered by a small `pytest` suite in `tests/`. It doesn't touch git or the filesystem, so it runs anywhere:
 
 ```bash
 pip install pytest pycodestyle
@@ -168,14 +177,26 @@ python -m pytest tests/ -v
 python -m pycodestyle --max-line-length=79 git-scribe.py
 ```
 
-Both run automatically on every push via GitHub Actions — see the badge above.
+Runs automatically on every push via GitHub Actions.
+
+---
+
+## Releases
+
+- **[v1.0.0](https://github.com/arcanesandip/git-scribe/releases/tag/v1.0.0)** — fully deterministic, heuristic-only, zero network calls.
+- **`main`** — adds the optional local AI-verification layer; falls back to the same heuristics if unavailable.
 
 ---
 
 ## Requirements
 
-- Python 3.6+
-- `git` on your `PATH`
-- A remote already configured for `git push` to succeed
+- Python 3.6+, `git` on `PATH`, a configured remote for `git push`
+- *(Optional)* [Ollama](https://ollama.com) for AI-assisted descriptions
 
-No third-party packages.
+No third-party Python packages.
+
+---
+
+## License
+
+MIT — see [LICENSE](LICENSE).
