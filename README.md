@@ -80,18 +80,23 @@ Bigger models summarize multi-file diffs more completely and are less prone to e
 ## Install
 
 ### Option A: install script
-
-```bash
+ 
+````bash
 git clone https://github.com/arcanesandip/git-scribe.git
 cd git-scribe
-./install.sh
-```
-
-Checks for `python3`/`git`, lets you pick a model size if Ollama is installed (1.5b recommended, just press Enter), offers to pull it, installs the script to `~/scripts/git-scribe.py`, and adds `gcap`/`gcm` to your shell rc file idempotently.
-
-```bash
+bash install.sh
+````
+ 
+> **Note for Arch Linux / systemd users:** if you plan to use the optional AI verification layer, make sure the Ollama daemon is actually running before installing or pulling models — Arch's `ollama` package doesn't auto-start the service the way some other distros' installers do:
+> ```bash
+> sudo systemctl enable --now ollama
+> ```
+ 
+The installer checks for `python3`/`git`, lets you pick a model size if Ollama is installed (`1.5b` recommended, just press Enter), offers to pull it, installs the script to `~/scripts/git-scribe.py`, and adds `gcap`/`gcm` to your shell rc file idempotently.
+ 
+````bash
 source ~/.zshrc   # or ~/.bashrc
-```
+````
 
 ### Option B: manual
 
