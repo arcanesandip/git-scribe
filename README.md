@@ -20,23 +20,28 @@ Stopping to write a commit message breaks flow, and skipping it leaves a history
 
 ## How it works
 
-```
-[Working tree]
-     │
-     ▼  git add -A
-[State capture]        → git status / diff --cached / --name-status
-     │
-     ▼
-[File classifier]      → Added (+) / Modified (~) / Deleted (-)
-     │
-     ▼
-[Heuristic pre-pass]   → word-boundary rules → first-guess type + scope
-     │
-     ▼
-[AI verification]      → optional, local — reviews/corrects the guess, writes a description
-     │                     falls back to the heuristic result if unavailable
-     ▼
-[Commit + push]        → git commit -m "<type>(<scope>): <description>" && git push
+```mermaid
+graph TD
+    %% The nodes (boxes)
+    WT["[Working tree]"]
+    SC["[State capture]
+    → git status / diff --cached / --name-status"]
+    FC["[File classifier]
+    → Added (+) / Modified (~) / Deleted (-)"]
+    HP["[Heuristic pre-pass]
+    → word-boundary rules → first-guess type + scope"]
+    AI["[AI verification]
+    optional, local — reviews/corrects the guess, writes a description
+    falls back to the heuristic result if unavailable"]
+    CP["[Commit + push]
+    → git commit -m '&lt;type&gt;(&lt;scope&gt;): &lt;description&gt;' && git push"]
+
+    %% The connections (arrows)
+    WT -->|git add -A| SC
+    SC --> FC
+    FC --> HP
+    HP --> AI
+    AI --> CP
 ```
 
 ### Heuristic rules (first match wins)
